@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+kaggle.json
+access_token
+kaggle/__pycache__
+__pycache__/
+kaggle/kernel-metadata.json

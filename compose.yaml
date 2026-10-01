@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: vaani
+      POSTGRES_USER: vaani
+      POSTGRES_PASSWORD: vaani_local_only
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaani -d vaani"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - vaani_postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - vaani_redis:/data
+
+volumes:
+  vaani_postgres:
+  vaani_redis:

@@ -1,0 +1,31 @@
+{
+  "name": "vaani-loan-agent",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "next": "15.5.26",
+    "pg": "8.16.3",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "redis": "5.8.2",
+    "zod": "4.1.5",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/pg": "8.15.5",
+    "@types/react": "19.1.10",
+    "@types/react-dom": "19.1.7",
+    "@types/ws": "8.18.1",
+    "pg-mem": "3.0.5",
+    "tsx": "4.20.5",
+    "typescript": "5.8.3"
+  }
+}
