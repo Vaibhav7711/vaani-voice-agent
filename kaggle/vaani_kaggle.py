@@ -116,6 +116,23 @@ from parler_tts import ParlerTTSForConditionalGeneration, ParlerTTSStreamer
 from transformers import AutoTokenizer
 
 PORT = int(os.getenv("PORT", "8000"))
+
+#: Which ASR to serve. Named rather than inferred, and never "use the adapted
+#: one if a path happens to exist": a backend that changes underneath you makes
+#: every recorded latency and WER incomparable to the last run.
+#:
+#:   turbo  stock Whisper large-v3-turbo. No Hindi adaptation.
+#:   ct2    a CTranslate2 directory produced by indic-voice-pipeline's
+#:          scripts/convert_ct2.py, which merges a LoRA adapter into its base
+#:          model and converts the result. Requires ASR_CT2_PATH.
+#:
+#: faster-whisper cannot load a PEFT adapter directly -- CTranslate2 needs
+#: merged weights in its own format -- which is why the adapted path is a
+#: converted directory and not an adapter name.
+ASR_BACKENDS = ("turbo", "ct2")
+ASR_BACKEND = os.getenv("VAANI_ASR_BACKEND", "turbo").strip().lower()
+ASR_CT2_PATH = os.getenv("ASR_CT2_PATH", "").strip()
+ASR_COMPUTE_TYPE = os.getenv("ASR_COMPUTE_TYPE", "float16").strip()
 ASR_MODEL = os.getenv("ASR_MODEL", "turbo")
 TTS_MODEL = os.getenv("TTS_MODEL", "ai4bharat/indic-parler-tts")
 MAX_UTTERANCE_SECONDS = 30
@@ -131,6 +148,42 @@ _ENV_TOKEN = os.getenv("VAANI_INFERENCE_TOKEN")
 AUTH_TOKEN = _ENV_TOKEN or secrets.token_urlsafe(32)
 AUTH_TOKEN_SOURCE = "environment" if _ENV_TOKEN else "generated"
 HF_TOKEN = os.getenv("HF_TOKEN")
+
+
+def resolve_asr_source() -> tuple[str, bool]:
+    """The model faster-whisper should load, and whether it is Hindi-adapted.
+
+    Returns `(source, adapted)`. Refuses an unknown backend and a `ct2`
+    selection without a usable directory, rather than quietly serving stock
+    Whisper under a name that claims otherwise -- a silent fallback here would
+    attribute unadapted accuracy to an adapted model.
+    """
+    if ASR_BACKEND not in ASR_BACKENDS:
+        raise RuntimeError(
+            f"VAANI_ASR_BACKEND must be one of {ASR_BACKENDS}, got "
+            f"{ASR_BACKEND!r}")
+
+    if ASR_BACKEND == "turbo":
+        return ASR_MODEL, False
+
+    if not ASR_CT2_PATH:
+        raise RuntimeError(
+            "VAANI_ASR_BACKEND=ct2 needs ASR_CT2_PATH: a CTranslate2 directory "
+            "from indic-voice-pipeline's scripts/convert_ct2.py, usually "
+            "attached as a Kaggle Dataset under /kaggle/input/...")
+    directory = Path(ASR_CT2_PATH)
+    if not directory.is_dir():
+        raise RuntimeError(f"ASR_CT2_PATH {directory} is not a directory")
+    # CTranslate2 writes model.bin; a directory without it is a merged
+    # HuggingFace checkpoint that was never converted, and faster-whisper
+    # would fail later with a less obvious error.
+    if not (directory / "model.bin").is_file():
+        contents = sorted(p.name for p in directory.iterdir())[:8]
+        raise RuntimeError(
+            f"{directory} has no model.bin, so it is not a CTranslate2 model. "
+            f"Found: {contents}. If this is the -hf-merged sibling, run "
+            f"ct2-transformers-converter on it first.")
+    return str(directory), True
 
 
 def _kaggle_secret(name: str, *, required: bool = False) -> Optional[str]:
@@ -201,7 +254,10 @@ class Models:
 
         print(f"gpu: {torch.cuda.get_device_name(0)}", flush=True)
         asr_started = time.time()
-        self.asr = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16")
+        self.asr_source, self.asr_adapted = resolve_asr_source()
+        self.asr_compute_type = ASR_COMPUTE_TYPE
+        self.asr = WhisperModel(
+            self.asr_source, device="cuda", compute_type=ASR_COMPUTE_TYPE)
         self.asr_load_seconds = round(time.time() - asr_started, 1)
         # CTranslate2 allocates outside the torch allocator, so torch's figure
         # does not include Whisper. Reported separately rather than summed, to
@@ -379,7 +435,14 @@ async def health():
     return {
         "status": "ready" if models else "loading",
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-        "asr": ASR_MODEL,
+        # The backend is reported, not assumed: a WER or latency figure from
+        # this endpoint has to be attributable to the model that produced it.
+        "asr": {
+            "backend": ASR_BACKEND,
+            "source": None if not models else models.asr_source,
+            "computeType": ASR_COMPUTE_TYPE,
+            "hindiAdapted": None if not models else models.asr_adapted,
+        },
         "tts": TTS_MODEL,
         "uptimeSeconds": round(time.time() - started_at),
         # None, not 0, where nothing has been measured yet: a zero here would

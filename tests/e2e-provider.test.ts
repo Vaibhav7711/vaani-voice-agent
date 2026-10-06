@@ -212,9 +212,52 @@ test("a full turn completes against a loopback provider", async () => {
 
 const remoteUrl = process.env.VOICE_INFERENCE_WS_URL;
 const remoteKey = process.env.VOICE_INFERENCE_API_KEY;
-const remoteReady = Boolean(remoteUrl && remoteKey);
+const remoteConfigured = Boolean(remoteUrl && remoteKey);
 
-test("remote provider transcribes English and returns audio", { skip: remoteReady ? false : "set VOICE_INFERENCE_WS_URL and VOICE_INFERENCE_API_KEY to run against the deployed provider" }, async () => {
+/**
+ * Three states, not two, and they must not be conflated.
+ *
+ * Not configured is a skip. Configured but unreachable is also a skip, with a
+ * different reason -- a Kaggle tunnel dies with its session, and reporting that
+ * as a code failure sends the reader to debug the wrong thing. Reachable is a
+ * run.
+ *
+ * The reachability probe also rescues the auth test from a vacuous pass: it
+ * asserts that a wrong token produces an error, and an unreachable host
+ * produces one too, so without this it passed while the provider was down.
+ */
+async function providerReachable(): Promise<string | false> {
+  if (!remoteConfigured) {
+    return "set VOICE_INFERENCE_WS_URL and VOICE_INFERENCE_API_KEY to run against the deployed provider";
+  }
+  const health = remoteUrl!.replace("wss://", "https://").replace("/realtime", "/health");
+  try {
+    const response = await fetch(health, { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return `provider answered ${response.status} at /health`;
+    const body = (await response.json()) as { status?: string };
+    if (body.status !== "ready") return `provider /health reports "${body.status}"`;
+    return false;
+  } catch (error) {
+    return `provider unreachable (${String(error).slice(0, 80)}) -- the Kaggle session has probably ended; restart it and refresh .env.local`;
+  }
+}
+
+// Probed inside each test, not at module scope: tsx transpiles to CJS, where
+// top-level await is a transform error -- the same constraint that makes
+// import.meta.dirname unavailable here.
+type Ctx = { skip: (reason?: string) => void };
+
+async function requireProvider(t: Ctx): Promise<boolean> {
+  const reason = await providerReachable();
+  if (reason) {
+    t.skip(reason);
+    return false;
+  }
+  return true;
+}
+
+test("remote provider transcribes English and returns audio", async (t) => {
+  if (!(await requireProvider(t))) return;
   const result = await streamFixture(remoteUrl!, remoteKey, "en-16k.wav", "en-IN", 15_000);
   assert.deepEqual(result.errors, []);
   assert.equal(result.transcripts.length, 1, "expected exactly one final transcript");
@@ -224,7 +267,8 @@ test("remote provider transcribes English and returns audio", { skip: remoteRead
   console.log(`  en: ${result.elapsedMs} ms, "${result.transcripts[0]}"`);
 });
 
-test("remote provider transcribes Hindi and returns audio", { skip: remoteReady ? false : "set VOICE_INFERENCE_WS_URL and VOICE_INFERENCE_API_KEY to run against the deployed provider" }, async () => {
+test("remote provider transcribes Hindi and returns audio", async (t) => {
+  if (!(await requireProvider(t))) return;
   const result = await streamFixture(remoteUrl!, remoteKey, "hi-16k.wav", "hi-IN", 15_000);
   assert.deepEqual(result.errors, []);
   assert.equal(result.transcripts.length, 1, "expected exactly one final transcript");
@@ -234,7 +278,8 @@ test("remote provider transcribes Hindi and returns audio", { skip: remoteReady 
   console.log(`  hi: ${result.elapsedMs} ms, "${result.transcripts[0]}"`);
 });
 
-test("remote provider rejects a wrong bearer token", { skip: remoteReady ? false : "set VOICE_INFERENCE_WS_URL and VOICE_INFERENCE_API_KEY to run against the deployed provider" }, async () => {
+test("remote provider rejects a wrong bearer token", async (t) => {
+  if (!(await requireProvider(t))) return;
   const errors: string[] = [];
   const bridge = new ExternalWebSocketBridge(remoteUrl!, "definitely-not-the-token", true, "kaggle-gpu");
   await bridge.connect({
@@ -244,10 +289,17 @@ test("remote provider rejects a wrong bearer token", { skip: remoteReady ? false
   }).catch((error: unknown) => errors.push(String(error)));
   await new Promise((resolve) => setTimeout(resolve, 2_000));
   bridge.close();
+  // Reachability was established before this test was allowed to run, so an
+  // error here means the token was rejected rather than the host being absent.
   assert.ok(errors.length > 0, "an unauthenticated connection was accepted");
+  assert.ok(
+    !errors.some((message) => /ENOTFOUND|EAI_AGAIN|ECONNREFUSED/.test(message)),
+    `the provider was unreachable, so this proves nothing: ${errors.join("; ")}`,
+  );
 });
 
-test("remote provider suppresses a cancelled response", { skip: remoteReady ? false : "set VOICE_INFERENCE_WS_URL and VOICE_INFERENCE_API_KEY to run against the deployed provider" }, async () => {
+test("remote provider suppresses a cancelled response", async (t) => {
+  if (!(await requireProvider(t))) return;
   const errors: string[] = [];
   let deltasBeforeCancel = 0;
   let deltasAfterCancel = 0;

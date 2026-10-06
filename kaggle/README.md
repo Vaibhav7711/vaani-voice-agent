@@ -103,6 +103,69 @@ shared copy; only 8-hex fingerprints and the token's source are logged. The file
 is written at mode 0600, with a `.txt` extension because Kaggle's output browser
 filters `.env` files out of the listing.
 
+## Choosing the ASR backend
+
+`VAANI_ASR_BACKEND` selects which recogniser runs. The choice is explicit and
+never inferred from whether an adapter path happens to exist: a backend that
+changes underneath you makes every recorded latency and WER incomparable to the
+last run, and a silent fallback would attribute unadapted accuracy to an
+adapted model.
+
+| value | model | Hindi-adapted |
+| --- | --- | --- |
+| `turbo` (default) | stock Whisper large-v3-turbo | no |
+| `ct2` | a CTranslate2 directory you supply via `ASR_CT2_PATH` | yes |
+
+`ASR_COMPUTE_TYPE` defaults to `float16`; `int8_float16` is the T4 sweet spot
+(int8 weights, fp16 compute) and was measured at 1.31x throughput in
+indic-voice-pipeline, within a 1.6% WER tolerance.
+
+`/health` reports the live backend, its source, compute type and whether it is
+adapted, so any figure taken from this endpoint is attributable to the model
+that produced it.
+
+Misconfiguration is refused at startup rather than served: an unknown backend
+name, `ct2` without a path, a path that is not a directory, and a directory
+without `model.bin` all fail with the reason. That last case is the common
+one — it means the merged HuggingFace checkpoint was never converted.
+
+### Using a fine-tuned adapter from indic-voice-pipeline
+
+faster-whisper cannot load a PEFT adapter: CTranslate2 needs merged weights in
+its own format. [indic-voice-pipeline](https://github.com/Vaibhav7711/indic-voice-pipeline)
+produces exactly that artifact, so the handoff is a directory rather than an
+adapter name.
+
+```bash
+# in the indic-voice-pipeline checkout
+python scripts/convert_ct2.py \
+    --model openai/whisper-large-v3-turbo \
+    --adapter <your-turbo-lora> \
+    --out models/ct2/turbo-hindi \
+    --quantization int8_float16
+```
+
+Attach `models/ct2/turbo-hindi` as a Kaggle Dataset, then set in the kernel:
+
+```
+VAANI_ASR_BACKEND=ct2
+ASR_CT2_PATH=/kaggle/input/<dataset>/turbo-hindi
+ASR_COMPUTE_TYPE=int8_float16
+```
+
+**Two blockers to know before planning on this.** The adapter published on the
+Hub, `Hugme6969/whisper-medium-hindi-lora`, is trained on **whisper-medium**;
+LoRA weights are shaped to their base model and cannot be moved to
+large-v3-turbo. The turbo-based v2 adapter that measured 23.8% WER against
+40.4% unadapted is **not obtainable** — it lives at a local path with a blank
+model card, so that figure is not reproducible by anyone. Using the adapted
+backend therefore means either recovering those weights or retraining on turbo.
+
+Worth weighing against the effort: stock turbo measured 564-1048 ms here and
+transcribed both test utterances correctly **including the OTP digits**, which
+is the only part that gates the workflow. The adapter should improve WER on
+harder Hindi; it is not what limits this deployment.
+
 ## Connecting the local app
 
 `.env.local` is gitignored and contains exactly:
